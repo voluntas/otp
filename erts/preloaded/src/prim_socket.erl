@@ -38,7 +38,7 @@
     connect/1, connect/3,
     listen/2,
     accept/2,
-    send/4, sendto/4, sendto/5, sendmsg/4, sendmsg/5, sendv/3,
+    send/4, sendto/4, sendto/5, sendmsg/4, sendmsg/5, sendmmsg/4, sendv/3,
     sendfile/4, sendfile/5, sendfile_deferred_close/1,
     recv/4, recvfrom/4, recvmsg/5,
     close/1, finalize_close/1,
@@ -55,7 +55,7 @@
 -nifs([nif_info/0, nif_info/1, nif_supports/0, nif_supports/1, nif_command/1,
        nif_open/2, nif_open/4, nif_bind/2, nif_connect/1, nif_connect/3,
        nif_listen/2, nif_accept/2,
-       nif_send/4, nif_sendto/5, nif_sendmsg/5, nif_sendv/3,
+       nif_send/4, nif_sendto/5, nif_sendmsg/5, nif_sendmmsg/4, nif_sendv/3,
        nif_sendfile/5, nif_sendfile/4, nif_sendfile/1, nif_recv/4,
        nif_recvfrom/4, nif_recvmsg/5, nif_close/1, nif_shutdown/2,
        nif_setopt/5, nif_getopt/3, nif_getopt/4, nif_sockname/1,
@@ -690,6 +690,42 @@ sendmsg_invalid(IOV, Cont, Cause) ->
             {iov, invalid_iov(IOV, 0)}
     end.
 
+
+%% ===========================================================================
+%% sendmmsg - send multiple messages in one NIF call
+%%
+%% Msgs: list of #{iov => Binary | IOList, addr => SockAddr}
+%% Returns: {ok, SentCount} | {error, Reason}
+%%
+
+sendmmsg(SockRef, Msgs, Flags, SendRef) ->
+    try enc_msg_flags(Flags) of
+        EFlags ->
+            EMsgs = enc_mmsg_list(Msgs),
+            nif_sendmmsg(SockRef, EMsgs, EFlags, SendRef)
+    catch throw : Reason ->
+            {error, Reason}
+    end.
+
+enc_mmsg_list(Msgs) ->
+    enc_mmsg_list(Msgs, []).
+
+enc_mmsg_list([], Acc) ->
+    lists:reverse(Acc);
+enc_mmsg_list([#{iov := IOV} = Msg | Rest], Acc) ->
+    EMsg = case Msg of
+               #{addr := Addr} ->
+                   #{iov => erlang:iolist_to_binary(IOV),
+                     addr => enc_sockaddr(Addr)};
+               _ ->
+                   #{iov => erlang:iolist_to_binary(IOV)}
+           end,
+    enc_mmsg_list(Rest, [EMsg | Acc]);
+enc_mmsg_list([_ | Rest], Acc) ->
+    %% Skip invalid messages
+    enc_mmsg_list(Rest, Acc).
+
+
 rest_iov(0, []) ->
     [];
 rest_iov(Written, [B|IOV]) when Written >= byte_size(B) ->
@@ -1255,6 +1291,7 @@ nif_accept(_SockRef, _Ref) -> erlang:nif_error(notsup).
 nif_send(_SockRef, _Bin, _Flags, _SendRef) -> erlang:nif_error(notsup).
 nif_sendto(_SockRef, _Bin, _Dest, _Flags, _SendRef) -> erlang:nif_error(notsup).
 nif_sendmsg(_SockRef, _Msg, _Flags, _SendRef, _IOV) -> erlang:nif_error(notsup).
+nif_sendmmsg(_SockRef, _Msgs, _Flags, _SendRef) -> erlang:nif_error(notsup).
 nif_sendv(_SockRef, _IOVec, _SendRef) -> erlang:nif_error(notsup).
 
 nif_sendfile(_SockRef, _SendRef, _Offset, _Count, _InFileRef) ->

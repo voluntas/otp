@@ -45,6 +45,7 @@
 #include <liburing.h>
 #include <string.h>
 #include <errno.h>
+#include <sched.h>
 #include <sys/uio.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -98,42 +99,109 @@ esuring_init_ring(ESURingInstance* inst, unsigned int idx)
 {
     struct io_uring_params params;
     int ret;
+    unsigned int group_idx;
+    unsigned int rings_per_group;
 
     memset(inst, 0, sizeof(*inst));
     inst->eventfd = -1;
-    inst->need_mutex = (idx == 0);  /* Only ring 0 needs mutex */
+    inst->need_mutex = (idx == 0);  /* Only ring 0 needs mutex (dirty schedulers) */
 
-    /* Initialize io_uring with SQPOLL if possible */
+    /*
+     * SQPOLL strategy with ATTACH_WQ for shared SQPOLL threads:
+     * - Ring 0 (dirty): COOP_TASKRUN (low frequency, uses mutex)
+     * - Normal scheduler rings: Grouped into SQPOLL groups
+     *   - Each group has 1 parent ring + attached child rings
+     *   - Groups share SQPOLL threads via ATTACH_WQ
+     *   - Number of groups = min(schedulers/2, MAX_SQPOLL_GROUPS)
+     *
+     * This balances between reducing SQPOLL threads and avoiding bottlenecks.
+     */
     memset(&params, 0, sizeof(params));
-    params.flags = IORING_SETUP_SQPOLL;
-    params.sq_thread_idle = 2000;
 
+    if (idx == 0) {
+        goto try_coop_taskrun;
+    }
+
+    /* Calculate which SQPOLL group this ring belongs to */
+    /* rings_per_group determines how many rings share one SQPOLL thread */
+    rings_per_group = (gctrl.num_rings > 5) ? 2 : 1;  /* 2 rings per SQPOLL thread */
+    group_idx = (idx - 1) / rings_per_group;
+    if (group_idx >= ESURING_MAX_SQPOLL_GROUPS) {
+        group_idx = ESURING_MAX_SQPOLL_GROUPS - 1;  /* Cap to max groups */
+    }
+
+    if (gctrl.sqpoll_parent_fds[group_idx] < 0) {
+        /* This ring becomes the parent for this SQPOLL group */
+        params.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
+        params.sq_thread_idle = 2000;  /* 2 seconds idle before sleeping */
+
+        ret = io_uring_queue_init_params(ESURING_RING_SIZE, &inst->ring, &params);
+        if (ret >= 0) {
+            inst->sqpoll = TRUE;
+            gctrl.sqpoll_parent_fds[group_idx] = inst->ring.ring_fd;
+            gctrl.num_sqpoll_groups++;
+            SGDBG(("ESURING", "Ring %u: SQPOLL parent for group %u (fd=%d)\r\n",
+                   idx, group_idx, inst->ring.ring_fd));
+        } else {
+            SGDBG(("ESURING", "Ring %u: SQPOLL failed (%d), trying COOP_TASKRUN\r\n",
+                   idx, ret));
+            goto try_coop_taskrun;
+        }
+    } else {
+        /* Attach to the parent ring of this group */
+        params.flags = IORING_SETUP_SQPOLL | IORING_SETUP_ATTACH_WQ | IORING_SETUP_SINGLE_ISSUER;
+        params.wq_fd = gctrl.sqpoll_parent_fds[group_idx];
+        params.sq_thread_idle = 2000;
+
+        ret = io_uring_queue_init_params(ESURING_RING_SIZE, &inst->ring, &params);
+        if (ret >= 0) {
+            inst->sqpoll = TRUE;
+            __atomic_fetch_add(&gctrl.stat_sqpoll_shared, 1, __ATOMIC_RELAXED);
+            SGDBG(("ESURING", "Ring %u: SQPOLL attached to group %u (wq_fd=%d)\r\n",
+                   idx, group_idx, gctrl.sqpoll_parent_fds[group_idx]));
+        } else {
+            /* ATTACH_WQ failed, try independent SQPOLL */
+            SGDBG(("ESURING", "Ring %u: ATTACH_WQ failed (%d), trying independent SQPOLL\r\n",
+                   idx, ret));
+            memset(&params, 0, sizeof(params));
+            params.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
+            params.sq_thread_idle = 2000;
+
+            ret = io_uring_queue_init_params(ESURING_RING_SIZE, &inst->ring, &params);
+            if (ret >= 0) {
+                inst->sqpoll = TRUE;
+                SGDBG(("ESURING", "Ring %u: Independent SQPOLL\r\n", idx));
+            } else {
+                goto try_coop_taskrun;
+            }
+        }
+    }
+
+    goto ring_init_done;
+
+try_coop_taskrun:
+    /* Ring 0 or fallback: Use COOP_TASKRUN */
+    memset(&params, 0, sizeof(params));
+    params.flags = IORING_SETUP_COOP_TASKRUN;
     ret = io_uring_queue_init_params(ESURING_RING_SIZE, &inst->ring, &params);
 
     if (ret >= 0) {
-        inst->sqpoll = TRUE;
-        SGDBG(("ESURING", "Ring %u: SQPOLL mode enabled\r\n", idx));
+        inst->sqpoll = FALSE;
+        SGDBG(("ESURING", "Ring %u: COOP_TASKRUN mode\r\n", idx));
     } else {
-        /* SQPOLL failed, try with COOP_TASKRUN */
+        /* Try basic init */
         memset(&params, 0, sizeof(params));
-        params.flags = IORING_SETUP_COOP_TASKRUN;
         ret = io_uring_queue_init_params(ESURING_RING_SIZE, &inst->ring, &params);
 
-        if (ret >= 0) {
-            inst->sqpoll = FALSE;
-            SGDBG(("ESURING", "Ring %u: COOP_TASKRUN mode\r\n", idx));
-        } else {
-            /* Try basic init */
-            memset(&params, 0, sizeof(params));
-            ret = io_uring_queue_init_params(ESURING_RING_SIZE, &inst->ring, &params);
-
-            if (ret < 0) {
-                SGDBG(("ESURING", "Ring %u: io_uring init failed: %d\r\n", idx, ret));
-                return ret;
-            }
-            inst->sqpoll = FALSE;
+        if (ret < 0) {
+            SGDBG(("ESURING", "Ring %u: io_uring init failed: %d\r\n", idx, ret));
+            return ret;
         }
+        inst->sqpoll = FALSE;
+        SGDBG(("ESURING", "Ring %u: Basic mode\r\n", idx));
     }
+
+ring_init_done:
 
     /* Create eventfd for CQE notifications */
     inst->eventfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -250,10 +318,16 @@ esuring_init(unsigned int numThreads, const ESockData* dataP)
 
     (void)numThreads;
 
+    unsigned int grp;
+
     memset(&gctrl, 0, sizeof(gctrl));
     gctrl.dbg = dataP->dbg;
     gctrl.sockDbg = dataP->sockDbg;
     gctrl.epoll_fd = -1;
+    for (grp = 0; grp < ESURING_MAX_SQPOLL_GROUPS; grp++) {
+        gctrl.sqpoll_parent_fds[grp] = -1;
+    }
+    gctrl.num_sqpoll_groups = 0;
 
     /* Number of rings = schedulers + 1 (index 0 for dirty/other) */
     gctrl.num_rings = erts_no_schedulers + 1;
@@ -330,8 +404,9 @@ esuring_init(unsigned int numThreads, const ESockData* dataP)
         return ESOCK_IO_ERR_UNSUPPORTED;
     }
 
-    SGDBG(("ESURING", "io_uring backend initialized with %u rings\r\n",
-           gctrl.num_rings));
+    SGDBG(("ESURING", "io_uring backend initialized with %u rings, "
+           "%u SQPOLL groups, %lu attached rings\r\n",
+           gctrl.num_rings, gctrl.num_sqpoll_groups, gctrl.stat_sqpoll_shared));
 
     return ESOCK_IO_OK;
 }
@@ -396,10 +471,11 @@ esuring_finish(void)
 extern ERL_NIF_TERM
 esuring_info(ErlNifEnv* env)
 {
-    ERL_NIF_TERM keys[10], vals[10];
+    ERL_NIF_TERM keys[14], vals[14];
     ERL_NIF_TERM info;
-    unsigned int i;
+    unsigned int i, sqpoll_count = 0;
     unsigned long total_sendto = 0, total_sendmsg = 0, total_recvfrom = 0;
+    unsigned long total_sendmmsg = 0, total_sendmmsg_msgs = 0;
     unsigned long total_ring_full = 0, total_direct_syscall = 0;
 
     /* Aggregate statistics from all rings */
@@ -407,9 +483,12 @@ esuring_info(ErlNifEnv* env)
         ESURingInstance* inst = &gctrl.rings[i];
         total_sendto += inst->stat_sendto;
         total_sendmsg += inst->stat_sendmsg;
+        total_sendmmsg += inst->stat_sendmmsg;
+        total_sendmmsg_msgs += inst->stat_sendmmsg_msgs;
         total_recvfrom += inst->stat_recvfrom;
         total_ring_full += inst->stat_ring_full;
         total_direct_syscall += inst->stat_direct_syscall;
+        if (inst->sqpoll) sqpoll_count++;
     }
 
     keys[0] = enif_make_atom(env, "backend");
@@ -423,28 +502,40 @@ esuring_info(ErlNifEnv* env)
     vals[2] = (gctrl.num_rings > 1 && gctrl.rings[1].sqpoll) ?
               esock_atom_true : esock_atom_false;
 
-    keys[3] = enif_make_atom(env, "ring_size");
-    vals[3] = enif_make_uint(env, ESURING_RING_SIZE);
+    keys[3] = enif_make_atom(env, "sqpoll_rings");
+    vals[3] = enif_make_uint(env, sqpoll_count);
 
-    keys[4] = enif_make_atom(env, "sendto_count");
-    vals[4] = enif_make_uint64(env, total_sendto);
+    keys[4] = enif_make_atom(env, "sqpoll_groups");
+    vals[4] = enif_make_uint(env, gctrl.num_sqpoll_groups);
 
-    keys[5] = enif_make_atom(env, "sendmsg_count");
-    vals[5] = enif_make_uint64(env, total_sendmsg);
+    keys[5] = enif_make_atom(env, "ring_size");
+    vals[5] = enif_make_uint(env, ESURING_RING_SIZE);
 
-    keys[6] = enif_make_atom(env, "recvfrom_count");
-    vals[6] = enif_make_uint64(env, total_recvfrom);
+    keys[6] = enif_make_atom(env, "sendto_count");
+    vals[6] = enif_make_uint64(env, total_sendto);
 
-    keys[7] = enif_make_atom(env, "ring_full_count");
-    vals[7] = enif_make_uint64(env, total_ring_full);
+    keys[7] = enif_make_atom(env, "sendmsg_count");
+    vals[7] = enif_make_uint64(env, total_sendmsg);
 
-    keys[8] = enif_make_atom(env, "direct_syscall_count");
-    vals[8] = enif_make_uint64(env, total_direct_syscall);
+    keys[8] = enif_make_atom(env, "sendmmsg_calls");
+    vals[8] = enif_make_uint64(env, total_sendmmsg);
 
-    keys[9] = enif_make_atom(env, "cqe_processed");
-    vals[9] = enif_make_uint64(env, gctrl.stat_cqe_processed);
+    keys[9] = enif_make_atom(env, "sendmmsg_msgs");
+    vals[9] = enif_make_uint64(env, total_sendmmsg_msgs);
 
-    enif_make_map_from_arrays(env, keys, vals, 10, &info);
+    keys[10] = enif_make_atom(env, "recvfrom_count");
+    vals[10] = enif_make_uint64(env, total_recvfrom);
+
+    keys[11] = enif_make_atom(env, "ring_full_count");
+    vals[11] = enif_make_uint64(env, total_ring_full);
+
+    keys[12] = enif_make_atom(env, "direct_syscall_count");
+    vals[12] = enif_make_uint64(env, total_direct_syscall);
+
+    keys[13] = enif_make_atom(env, "cqe_processed");
+    vals[13] = enif_make_uint64(env, gctrl.stat_cqe_processed);
+
+    enif_make_map_from_arrays(env, keys, vals, 14, &info);
     return info;
 }
 
@@ -668,7 +759,11 @@ esuring_sendto(ErlNifEnv*       env,
         return esock_atom_ok;
     }
 
-    /* Circular allocation - get next buffer slot */
+    /* Lock if needed (ring 0 only) - protects circular allocation */
+    if (inst->need_mutex)
+        enif_mutex_lock(inst->ring_mtx);
+
+    /* Circular allocation - get next buffer slot (protected by mutex for ring 0) */
     idx = inst->send_next_idx++;
     entry = &inst->send_pool[idx % ESURING_SEND_POOL_SIZE];
 
@@ -678,21 +773,20 @@ esuring_sendto(ErlNifEnv*       env,
     memcpy(&entry->addr, toAddrP, toAddrLen);
     entry->addrLen = toAddrLen;
 
-    /* Lock if needed (ring 0 only) */
-    if (inst->need_mutex)
-        enif_mutex_lock(inst->ring_mtx);
-
     /* Get SQE */
     sqe = io_uring_get_sqe(&inst->ring);
     if (sqe == NULL) {
-        /* SQ full - submit pending and retry */
+        /* SQ full - submit and spin with occasional yield for shared SQPOLL */
         int spin;
 
         io_uring_submit(&inst->ring);
         inst->pending_submits = 0;
 
-        for (spin = 0; spin < 8 && sqe == NULL; spin++) {
-            esuring_cpu_relax();
+        for (spin = 0; spin < 128 && sqe == NULL; spin++) {
+            if ((spin & 15) == 0)
+                sched_yield();  /* Yield every 16 spins to help SQPOLL thread */
+            else
+                esuring_cpu_relax();
             sqe = io_uring_get_sqe(&inst->ring);
         }
 
@@ -811,7 +905,11 @@ esuring_sendmsg(ErlNifEnv*       env,
         return esock_atom_ok;
     }
 
-    /* Circular allocation - get next iovec entry */
+    /* Lock if needed (ring 0 only) - protects circular allocation */
+    if (inst->need_mutex)
+        enif_mutex_lock(inst->ring_mtx);
+
+    /* Circular allocation - get next iovec entry (protected by mutex for ring 0) */
     idx = inst->iov_next_idx++;
     entry = &inst->iov_pool[idx % ESURING_IOV_POOL_SIZE];
 
@@ -842,20 +940,20 @@ esuring_sendmsg(ErlNifEnv*       env,
 
     enif_free_iovec(iovecP);
 
-    /* Lock if needed */
-    if (inst->need_mutex)
-        enif_mutex_lock(inst->ring_mtx);
-
     /* Get SQE */
     sqe = io_uring_get_sqe(&inst->ring);
     if (sqe == NULL) {
+        /* SQ full - submit and spin with occasional yield for shared SQPOLL */
         int spin;
 
         io_uring_submit(&inst->ring);
         inst->pending_submits = 0;
 
-        for (spin = 0; spin < 8 && sqe == NULL; spin++) {
-            esuring_cpu_relax();
+        for (spin = 0; spin < 128 && sqe == NULL; spin++) {
+            if ((spin & 15) == 0)
+                sched_yield();  /* Yield every 16 spins to help SQPOLL thread */
+            else
+                esuring_cpu_relax();
             sqe = io_uring_get_sqe(&inst->ring);
         }
 
@@ -925,7 +1023,6 @@ esuring_recvfrom(ErlNifEnv*       env,
     if (opP == NULL)
         return esock_make_error_errno(env, ENOMEM);
 
-    opP->ring_idx = ring_idx;
     opP->env = enif_alloc_env();
 
     if (opP->env == NULL) {
@@ -1072,6 +1169,164 @@ esuring_cancel_send(ErlNifEnv*       env,
     (void)sockRef;
     (void)opRef;
     return esock_atom_ok;
+}
+
+/* ========================================================================
+ * sendmmsg - batch send multiple messages with io_uring
+ *
+ * This function prepares multiple SQEs in one NIF call, avoiding
+ * the per-message NIF call overhead. All messages are submitted
+ * as fire-and-forget operations.
+ *
+ * eMsgs format: list of #{iov => Binary, addr => SockAddr}
+ */
+
+extern ERL_NIF_TERM
+esuring_sendmmsg(ErlNifEnv*       env,
+                 ESockDescriptor* descP,
+                 ERL_NIF_TERM     sockRef,
+                 ERL_NIF_TERM     sendRef,
+                 ERL_NIF_TERM     eMsgs,
+                 int              flags,
+                 const ESockData* dataP)
+{
+    ESURingInstance* inst = esuring_get_ring();
+    ERL_NIF_TERM head, tail, eAddr, eIOV;
+    unsigned int msg_count = 0;
+    unsigned int sent_count = 0;
+
+    (void)sockRef;
+    (void)sendRef;
+    (void)dataP;
+
+    __atomic_fetch_add(&inst->stat_sendmmsg, 1, __ATOMIC_RELAXED);
+
+    if (!IS_OPEN(descP->writeState))
+        return esock_make_error_closed(env);
+
+    /* Lock if needed */
+    if (inst->need_mutex)
+        enif_mutex_lock(inst->ring_mtx);
+
+    /* Process each message in the list */
+    tail = eMsgs;
+    while (enif_get_list_cell(env, tail, &head, &tail)) {
+        ErlNifBinary data;
+        ESockAddress toAddr;
+        SOCKLEN_T toAddrLen = 0;
+        ESURingSendEntry* entry;
+        struct io_uring_sqe* sqe;
+        unsigned int idx;
+
+        if (msg_count >= ESURING_MMSG_MAX)
+            break;
+
+        /* Extract iov (binary data) from message map */
+        if (!enif_get_map_value(env, head, esock_atom_iov, &eIOV)) {
+            continue;  /* Skip invalid message */
+        }
+        if (!enif_inspect_iolist_as_binary(env, eIOV, &data)) {
+            continue;  /* Skip invalid iov */
+        }
+
+        /* Extract addr (optional) */
+        if (enif_get_map_value(env, head, esock_atom_addr, &eAddr)) {
+            if (!esock_decode_sockaddr(env, eAddr, &toAddr, &toAddrLen)) {
+                continue;  /* Skip invalid addr */
+            }
+        }
+
+        /* Skip if data is too large for pool */
+        if (data.size > ESURING_SEND_BUF_SIZE) {
+            /* Fall back to direct syscall for large packets */
+            ssize_t ret = sendto(descP->sock, data.data, data.size,
+                                 flags, (struct sockaddr*)&toAddr, toAddrLen);
+            if (ret >= 0) {
+                sent_count++;
+            }
+            __atomic_fetch_add(&inst->stat_direct_syscall, 1, __ATOMIC_RELAXED);
+            msg_count++;
+            continue;
+        }
+
+        /* Allocate from pool */
+        idx = inst->send_next_idx++;
+        entry = &inst->send_pool[idx % ESURING_SEND_POOL_SIZE];
+
+        /* Copy data to pool buffer */
+        memcpy(entry->buf, data.data, data.size);
+        entry->size = data.size;
+        if (toAddrLen > 0) {
+            memcpy(&entry->addr, &toAddr, toAddrLen);
+            entry->addrLen = toAddrLen;
+        } else {
+            entry->addrLen = 0;
+        }
+
+        /* Get SQE */
+        sqe = io_uring_get_sqe(&inst->ring);
+        if (sqe == NULL) {
+            /* Ring full - submit and retry */
+            io_uring_submit(&inst->ring);
+            inst->pending_submits = 0;
+
+            int spin;
+            for (spin = 0; spin < 128 && sqe == NULL; spin++) {
+                if ((spin & 15) == 0)
+                    sched_yield();
+                else
+                    esuring_cpu_relax();
+                sqe = io_uring_get_sqe(&inst->ring);
+            }
+
+            if (sqe == NULL) {
+                /* Still no SQE - fall back to direct syscall */
+                ssize_t ret = sendto(descP->sock, entry->buf, entry->size,
+                                     flags, (struct sockaddr*)&entry->addr,
+                                     entry->addrLen);
+                if (ret >= 0) {
+                    sent_count++;
+                }
+                __atomic_fetch_add(&inst->stat_ring_full, 1, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&inst->stat_direct_syscall, 1, __ATOMIC_RELAXED);
+                msg_count++;
+                continue;
+            }
+        }
+
+        /* Prepare sendto operation */
+        if (entry->addrLen > 0) {
+            io_uring_prep_sendto(sqe, descP->sock,
+                                 entry->buf, entry->size,
+                                 flags,
+                                 (struct sockaddr*)&entry->addr, entry->addrLen);
+        } else {
+            io_uring_prep_send(sqe, descP->sock,
+                               entry->buf, entry->size,
+                               flags);
+        }
+
+        /* Fire-and-forget: skip CQE on success */
+        sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+        io_uring_sqe_set_data(sqe, ESURING_FIRE_AND_FORGET);
+
+        sent_count++;
+        msg_count++;
+        inst->pending_submits++;
+    }
+
+    /* Submit all pending SQEs - always submit in sendmmsg to ensure delivery */
+    if (inst->pending_submits > 0) {
+        io_uring_submit(&inst->ring);
+        inst->pending_submits = 0;
+    }
+
+    if (inst->need_mutex)
+        enif_mutex_unlock(inst->ring_mtx);
+
+    __atomic_fetch_add(&inst->stat_sendmmsg_msgs, sent_count, __ATOMIC_RELAXED);
+
+    return esock_make_ok2(env, enif_make_uint(env, sent_count));
 }
 
 #endif /* ESOCK_USE_URING */

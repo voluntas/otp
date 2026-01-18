@@ -5938,6 +5938,81 @@ ERL_NIF_TERM nif_sendmsg(ErlNifEnv*         env,
 }
 
 
+/* ----------------------------------------------------------------------
+ * nif_sendmmsg
+ *
+ * Description:
+ * Send multiple messages on a socket using io_uring batch submission.
+ *
+ * Arguments:
+ * Socket (ref) - Points to the socket descriptor.
+ * Msgs         - List of message maps (#{iov => Binary, addr => SockAddr})
+ * Flags        - Send flags as an integer().
+ * SendRef      - A unique id reference() for this request.
+ */
+
+static
+ERL_NIF_TERM nif_sendmmsg(ErlNifEnv*         env,
+                          int                argc,
+                          const ERL_NIF_TERM argv[])
+{
+    ERL_NIF_TERM     res, sockRef, sendRef, eMsgs;
+    ESockDescriptor* descP;
+    int              flags;
+
+    ESOCK_ASSERT( argc == 4 );
+
+    SGDBG( ("SOCKET", "nif_sendmmsg -> entry with argc: %d\r\n", argc) );
+
+    sockRef = argv[0];
+    eMsgs   = argv[1];
+    sendRef = argv[3];
+
+    if (! ESOCK_GET_RESOURCE(env, sockRef, (void**) &descP)) {
+        SGDBG( ("SOCKET", "nif_sendmmsg -> get resource failed\r\n") );
+        return enif_make_badarg(env);
+    }
+
+    /* Extract arguments and perform preliminary validation */
+    if ((! enif_is_ref(env, sendRef)) ||
+        (! enif_is_list(env, eMsgs))) {
+        SSDBG( descP, ("SOCKET", "nif_sendmmsg -> argv decode failed\r\n") );
+        return enif_make_badarg(env);
+    }
+    if (! GET_INT(env, argv[2], &flags)) {
+        if (IS_INTEGER(env, argv[2]))
+            return esock_make_error_integer_range(env, argv[2]);
+        else
+            return enif_make_badarg(env);
+    }
+
+    MLOCK(descP->writeMtx);
+
+    SSDBG( descP,
+           ("SOCKET", "nif_sendmmsg(%T), {%d,0x%X} ->"
+            "\r\n   SendRef:   %T"
+            "\r\n   flags:     0x%X"
+            "\r\n",
+            sockRef, descP->sock, descP->writeState,
+            sendRef, flags) );
+
+#ifdef ESOCK_USE_URING
+    /* Use io_uring backend for batch send */
+    res = esuring_sendmmsg(env, descP, sockRef, sendRef, eMsgs, flags, &data);
+#else
+    /* Fallback: not supported without io_uring */
+    res = esock_make_error(env, esock_atom_notsup);
+#endif
+
+    MUNLOCK(descP->writeMtx);
+
+    SSDBG( descP, ("SOCKET", "nif_sendmmsg(%T) -> done with"
+                   "\r\n   res: %T"
+                   "\r\n", sockRef, res) );
+
+    return res;
+}
+
 
 /* ----------------------------------------------------------------------
  * nif_sendv
@@ -13899,6 +13974,7 @@ ErlNifFunc esock_funcs[] =
     {"nif_send",                4, nif_send, 0},
     {"nif_sendto",              5, nif_sendto, 0},
     {"nif_sendmsg",             5, nif_sendmsg, 0},
+    {"nif_sendmmsg",            4, nif_sendmmsg, 0},
     {"nif_sendv",               3, nif_sendv, 0},
     {"nif_sendfile",            5, nif_sendfile, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"nif_sendfile",            4, nif_sendfile, ERL_NIF_DIRTY_JOB_IO_BOUND},

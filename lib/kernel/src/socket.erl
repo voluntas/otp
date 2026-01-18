@@ -284,6 +284,7 @@ server(Addr, Port) ->
          send/2, send/3, send/4,
          sendto/3, sendto/4, sendto/5,
          sendmsg/2, sendmsg/3, sendmsg/4,
+         sendmmsg/2, sendmmsg/3, sendmmsg/4,
          sendv/2, sendv/3, sendv/4, rest_iov/2,
 
          sendfile/2, sendfile/3, sendfile/4, sendfile/5,
@@ -4380,6 +4381,91 @@ sendmsg_deadline_cont(SockRef, Data, Cont, Deadline, HasWritten) ->
       SockRef, Data, SelectHandle, Deadline, HasWritten,
       sendmsg, fun sendmsg_deadline_cont/5,
       prim_socket:sendmsg(SockRef, Data, Cont, SelectHandle)).
+
+
+%% ---------------------------------------------------------------------------
+%% sendmmsg - send multiple messages in one call
+%%
+%% This uses io_uring to batch multiple UDP messages into a single
+%% kernel submission, significantly reducing syscall overhead.
+%%
+
+-doc """
+Send multiple messages on a socket using batch I/O.
+
+Equivalent to `sendmmsg(Socket, Msgs, [], infinity)`.
+""".
+-doc(#{since => <<"OTP 28.0">>}).
+-spec sendmmsg(Socket, Msgs) -> {'ok', SentCount} | {'error', Reason}
+              when
+      Socket    :: socket(),
+      Msgs      :: [msg_send()],
+      SentCount :: non_neg_integer(),
+      Reason    :: posix() | 'closed' | 'notsup'.
+
+sendmmsg(Socket, Msgs) ->
+    sendmmsg(Socket, Msgs, [], infinity).
+
+-doc """
+Send multiple messages on a socket using batch I/O.
+
+Equivalent to `sendmmsg(Socket, Msgs, Flags, infinity)` or
+`sendmmsg(Socket, Msgs, [], Timeout)`.
+""".
+-doc(#{since => <<"OTP 28.0">>}).
+-spec sendmmsg(Socket, Msgs, Flags) -> {'ok', SentCount} | {'error', Reason}
+              when
+      Socket    :: socket(),
+      Msgs      :: [msg_send()],
+      Flags     :: [msg_flag() | integer()],
+      SentCount :: non_neg_integer(),
+      Reason    :: posix() | 'closed' | 'notsup';
+              (Socket, Msgs, Timeout) -> {'ok', SentCount} | {'error', Reason}
+              when
+      Socket    :: socket(),
+      Msgs      :: [msg_send()],
+      Timeout   :: timeout(),
+      SentCount :: non_neg_integer(),
+      Reason    :: posix() | 'closed' | 'notsup'.
+
+sendmmsg(Socket, Msgs, Flags) when is_list(Flags) ->
+    sendmmsg(Socket, Msgs, Flags, infinity);
+sendmmsg(Socket, Msgs, Timeout) ->
+    sendmmsg(Socket, Msgs, [], Timeout).
+
+-doc """
+Send multiple messages on a socket using batch I/O.
+
+This function sends multiple messages in a single call, using io_uring
+to batch the operations and minimize syscall overhead. This is particularly
+useful for UDP applications that need to send many small packets.
+
+Each message in `Msgs` is a map with at least an `iov` key containing
+the data to send. For unconnected sockets, an `addr` key specifying
+the destination address is also required.
+
+Returns `{ok, SentCount}` where `SentCount` is the number of messages
+that were successfully queued for sending.
+
+Note: This function requires io_uring support and will return
+`{error, notsup}` on platforms without io_uring.
+""".
+-doc(#{since => <<"OTP 28.0">>}).
+-spec sendmmsg(Socket, Msgs, Flags, Timeout) ->
+          {'ok', SentCount} | {'error', Reason}
+              when
+      Socket    :: socket(),
+      Msgs      :: [msg_send()],
+      Flags     :: [msg_flag() | integer()],
+      Timeout   :: timeout(),
+      SentCount :: non_neg_integer(),
+      Reason    :: posix() | 'closed' | 'notsup' | 'timeout'.
+
+sendmmsg(?socket(SockRef), Msgs, Flags, _Timeout)
+  when is_reference(SockRef), is_list(Msgs), is_list(Flags) ->
+    prim_socket:sendmmsg(SockRef, Msgs, Flags, make_ref());
+sendmmsg(Socket, Msgs, Flags, Timeout) ->
+    erlang:error(badarg, [Socket, Msgs, Flags, Timeout]).
 
 
 %% ---------------------------------------------------------------------------

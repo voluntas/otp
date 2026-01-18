@@ -59,6 +59,10 @@
 /* Batch submit configuration */
 #define ESURING_BATCH_SIZE      64      /* Submit after this many SQEs */
 
+/* sendmmsg configuration */
+#define ESURING_MMSG_MAX        1024    /* Max messages per sendmmsg call */
+#define ESURING_MMSG_BUF_SIZE   (ESURING_MMSG_MAX * 1500) /* ~1.5MB buffer */
+
 /* ========================================================================
  * Lock-free helpers
  */
@@ -125,6 +129,8 @@ typedef struct {
     /* Per-ring statistics */
     volatile unsigned long stat_sendto;
     volatile unsigned long stat_sendmsg;
+    volatile unsigned long stat_sendmmsg;
+    volatile unsigned long stat_sendmmsg_msgs;
     volatile unsigned long stat_recvfrom;
     volatile unsigned long stat_ring_full;
     volatile unsigned long stat_direct_syscall;
@@ -135,25 +141,29 @@ typedef struct {
  *
  * Manages all ring instances and the single CQE processing thread.
  */
+/* Maximum number of SQPOLL groups (each group shares one SQPOLL thread) */
+#define ESURING_MAX_SQPOLL_GROUPS 4
+
 typedef struct {
     ESURingInstance*    rings;          /* Array of ring instances */
     unsigned int        num_rings;      /* Number of rings (schedulers + 1) */
     int                 epoll_fd;       /* epoll for CQE notifications */
+    int                 sqpoll_parent_fds[ESURING_MAX_SQPOLL_GROUPS]; /* Parent ring fd per group */
+    unsigned int        num_sqpoll_groups; /* Actual number of SQPOLL groups */
     ErlNifTid           cqe_tid;        /* Single CQE polling thread */
     volatile int        running;        /* Thread running flag */
     BOOLEAN_T           dbg;
     BOOLEAN_T           sockDbg;
-    BOOLEAN_T           coop_taskrun;   /* TRUE if using COOP_TASKRUN */
 
     /* Global statistics */
     volatile unsigned long stat_cqe_processed;
+    volatile unsigned long stat_sqpoll_shared;  /* Rings sharing SQPOLL */
 } ESURingGlobal;
 
 /* ========================================================================
  * RecvFrom operation data (needs completion tracking)
  */
 struct ESURingRecvOp_ {
-    unsigned int        ring_idx;       /* Which ring this op belongs to */
     ErlNifPid           caller;
     ErlNifEnv*          env;
     struct msghdr       msg;
@@ -208,6 +218,20 @@ extern ERL_NIF_TERM esuring_cancel_send(ErlNifEnv*       env,
                                         ESockDescriptor* descP,
                                         ERL_NIF_TERM     sockRef,
                                         ERL_NIF_TERM     opRef);
+
+/* ========================================================================
+ * sendmmsg - batch send multiple messages with io_uring
+ *
+ * eMsgs: list of #{iov => IOV, addr => Addr} maps
+ * Returns: {ok, SentCount} | {error, Reason}
+ */
+extern ERL_NIF_TERM esuring_sendmmsg(ErlNifEnv*       env,
+                                     ESockDescriptor* descP,
+                                     ERL_NIF_TERM     sockRef,
+                                     ERL_NIF_TERM     sendRef,
+                                     ERL_NIF_TERM     eMsgs,
+                                     int              flags,
+                                     const ESockData* dataP);
 
 #endif /* ESOCK_USE_URING */
 
