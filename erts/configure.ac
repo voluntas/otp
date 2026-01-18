@@ -187,6 +187,13 @@ AS_HELP_STRING([--disable-kernel-poll], [disable kernel poll support]),
     *)  enable_kernel_poll=yes ;;
   esac ], enable_kernel_poll=unknown)
 
+AC_ARG_ENABLE(esock-uring,
+AS_HELP_STRING([--enable-esock-uring], [enable io_uring socket backend])
+AS_HELP_STRING([--disable-esock-uring], [disable io_uring socket backend]),
+[ case "$enableval" in
+    no) enable_esock_uring=no ;;
+    *)  enable_esock_uring=yes ;;
+  esac ], enable_esock_uring=no)
 
 AC_ARG_ENABLE(sctp,
 AS_HELP_STRING([--enable-sctp], [enable sctp support (default) to on demand load the SCTP library in runtime if needed])
@@ -3283,6 +3290,30 @@ case $enable_kernel_poll-$have_kernel_poll in
 	AC_MSG_RESULT([yes; $have_kernel_poll]);;
 esac
 AC_SUBST(ERTS_BUILD_FALLBACK_POLL)
+
+dnl
+dnl Check for io_uring support (for esock uring backend)
+dnl
+AC_MSG_CHECKING(whether io_uring socket backend should be enabled)
+ESOCK_USE_URING=no
+AS_IF([test "x$enable_esock_uring" = "xyes"],
+[
+  AC_CHECK_HEADER([liburing.h],
+  [
+    AC_CHECK_LIB([uring], [io_uring_queue_init],
+    [
+      ESOCK_USE_URING=yes
+      AC_DEFINE(ESOCK_USE_URING, 1, [Define to enable io_uring socket backend])
+      LIBURING="-luring"
+    ],
+    [AC_MSG_ERROR([liburing library not found. Install liburing-dev or use --disable-esock-uring])])
+  ],
+  [AC_MSG_ERROR([liburing.h not found. Install liburing-dev or use --disable-esock-uring])])
+],
+[AC_MSG_RESULT([no])])
+AS_IF([test "x$ESOCK_USE_URING" = "xyes"], [AC_MSG_RESULT([yes])])
+AC_SUBST(ESOCK_USE_URING)
+AC_SUBST(LIBURING)
 
 AC_MSG_CHECKING([whether putenv() stores a copy of the key-value pair])
 AC_RUN_IFELSE([AC_LANG_SOURCE([[

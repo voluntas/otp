@@ -383,6 +383,7 @@ typedef long ssize_t;
     GLOBAL_ATOM_DEF(initmsg);                  \
     GLOBAL_ATOM_DEF(invalid);                  \
     GLOBAL_ATOM_DEF(integer_range);            \
+    GLOBAL_ATOM_DEF(io_backend);               \
     GLOBAL_ATOM_DEF(iov);                      \
     GLOBAL_ATOM_DEF(ip);                       \
     GLOBAL_ATOM_DEF(ipcomp_level);             \
@@ -584,6 +585,7 @@ typedef long ssize_t;
     GLOBAL_ATOM_DEF(staticarp);		       \
     GLOBAL_ATOM_DEF(stf);                      \
     GLOBAL_ATOM_DEF(stream);                   \
+    GLOBAL_ATOM_DEF(sync);                     \
     GLOBAL_ATOM_DEF(syncnt);                   \
     GLOBAL_ATOM_DEF(syn_rcvd);                 \
     GLOBAL_ATOM_DEF(syn_retrans);              \
@@ -612,6 +614,7 @@ typedef long ssize_t;
     GLOBAL_ATOM_DEF(unknown);                  \
     GLOBAL_ATOM_DEF(unspec);                   \
     GLOBAL_ATOM_DEF(up);                       \
+    GLOBAL_ATOM_DEF(uring);                    \
     GLOBAL_ATOM_DEF(usec);                     \
     GLOBAL_ATOM_DEF(user);                     \
     GLOBAL_ATOM_DEF(user_timeout);             \

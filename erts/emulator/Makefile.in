@@ -439,6 +439,12 @@ endif
 
 LIBS += @LIBCARBON@
 
+# io_uring support for socket backend
+ESOCK_USE_URING = @ESOCK_USE_URING@
+ifeq ($(ESOCK_USE_URING),yes)
+LIBS += @LIBURING@
+endif
+
 TTF_DIR=$(TARGET)/$(TYPE)/$(FLAVOR)
 CREATE_DIRS += $(TTF_DIR)
 
@@ -1207,6 +1213,10 @@ OS_OBJS = \
 	$(OBJDIR)/sys_time.o \
 	$(OBJDIR)/sys_signal_stack.o \
 	$(OBJDIR)/unix_socket_syncio.o
+
+ifeq ($(ESOCK_USE_URING),yes)
+OS_OBJS += $(OBJDIR)/unix_socket_uring.o
+endif
 
 DRV_OBJS = \
 	$(OBJDIR)/inet_drv.o \

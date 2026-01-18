@@ -117,6 +117,9 @@
 /* Use socket registry by default */
 #undef ESOCK_USE_SOCKET_REGISTRY
 
+/* Define to enable io_uring socket backend */
+#undef ESOCK_USE_URING
+
 /* Use verbose mutex names */
 #undef ESOCK_VERBOSE_MTX_NAMES
 

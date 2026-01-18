@@ -657,6 +657,8 @@ DTRACE_ENABLED
 DTRACE_CPP
 DTRACE
 EMU_CC
+LIBURING
+ESOCK_USE_URING
 ERTS_BUILD_FALLBACK_POLL
 FLAVORS
 PRIMARY_FLAVOR
@@ -827,6 +829,7 @@ with_termcap
 enable_lock_checking
 enable_lock_counter
 enable_kernel_poll
+enable_esock_uring
 enable_sctp
 enable_jit
 enable_m64_build
@@ -1542,6 +1545,8 @@ Optional Features:
   --enable-lock-counter   enable lock counters
   --enable-kernel-poll    enable kernel poll support
   --disable-kernel-poll   disable kernel poll support
+  --enable-esock-uring    enable io_uring socket backend
+  --disable-esock-uring   disable io_uring socket backend
   --enable-sctp           enable sctp support (default) to on demand load the
                           SCTP library in runtime if needed
   --enable-sctp=lib       enable sctp support to link against the SCTP library
@@ -7233,6 +7238,18 @@ else case e in #(
 esac
 fi
 
+
+# Check whether --enable-esock-uring was given.
+if test ${enable_esock_uring+y}
+then :
+  enableval=$enable_esock_uring;  case "$enableval" in
+    no) enable_esock_uring=no ;;
+    *)  enable_esock_uring=yes ;;
+  esac
+else case e in #(
+  e) enable_esock_uring=no ;;
+esac
+fi
 
 
 # Check whether --enable-sctp was given.
@@ -26457,6 +26474,93 @@ printf "%s\n" "#define ERTS_ENABLE_KERNEL_POLL 1" >>confdefs.h
 	{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: yes; $have_kernel_poll" >&5
 printf "%s\n" "yes; $have_kernel_poll" >&6; };;
 esac
+
+
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether io_uring socket backend should be enabled" >&5
+printf %s "checking whether io_uring socket backend should be enabled... " >&6; }
+ESOCK_USE_URING=no
+if test "x$enable_esock_uring" = "xyes"
+then :
+
+  ac_fn_c_check_header_compile "$LINENO" "liburing.h" "ac_cv_header_liburing_h" "$ac_includes_default"
+if test "x$ac_cv_header_liburing_h" = xyes
+then :
+
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for io_uring_queue_init in -luring" >&5
+printf %s "checking for io_uring_queue_init in -luring... " >&6; }
+if test ${ac_cv_lib_uring_io_uring_queue_init+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) ac_check_lib_save_LIBS=$LIBS
+LIBS="-luring  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.
+   The 'extern "C"' is for builds by C++ compilers;
+   although this is not generally supported in C code supporting it here
+   has little cost and some practical benefit (sr 110532).  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char io_uring_queue_init (void);
+int
+main (void)
+{
+return io_uring_queue_init ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  ac_cv_lib_uring_io_uring_queue_init=yes
+else case e in #(
+  e) ac_cv_lib_uring_io_uring_queue_init=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_uring_io_uring_queue_init" >&5
+printf "%s\n" "$ac_cv_lib_uring_io_uring_queue_init" >&6; }
+if test "x$ac_cv_lib_uring_io_uring_queue_init" = xyes
+then :
+
+      ESOCK_USE_URING=yes
+
+printf "%s\n" "#define ESOCK_USE_URING 1" >>confdefs.h
+
+      LIBURING="-luring"
+
+else case e in #(
+  e) as_fn_error $? "liburing library not found. Install liburing-dev or use --disable-esock-uring" "$LINENO" 5 ;;
+esac
+fi
+
+
+else case e in #(
+  e) as_fn_error $? "liburing.h not found. Install liburing-dev or use --disable-esock-uring" "$LINENO" 5 ;;
+esac
+fi
+
+
+else case e in #(
+  e) { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
+printf "%s\n" "no" >&6; } ;;
+esac
+fi
+if test "x$ESOCK_USE_URING" = "xyes"
+then :
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+printf "%s\n" "yes" >&6; }
+fi
+
 
 
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether putenv() stores a copy of the key-value pair" >&5

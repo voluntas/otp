@@ -402,6 +402,9 @@ static void (*esock_sctp_freepaddrs)(struct sockaddr *addrs) = NULL;
 #include "socket_io.h"
 #include "socket_asyncio.h"
 #include "socket_syncio.h"
+#ifdef ESOCK_USE_URING
+#include "socket_uring.h"
+#endif
 #include "prim_file_nif_dyncall.h"
 
 #if defined(ERTS_INLINE)
@@ -2115,6 +2118,7 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(info);                            \
     GLOBAL_ATOM_DECL(initmsg);                         \
     GLOBAL_ATOM_DECL(invalid);                         \
+    GLOBAL_ATOM_DECL(io_backend);                      \
     GLOBAL_ATOM_DECL(integer_range);                   \
     GLOBAL_ATOM_DECL(iov);                             \
     GLOBAL_ATOM_DECL(ip);                              \
@@ -2316,6 +2320,7 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(status);                          \
     GLOBAL_ATOM_DECL(stf);                             \
     GLOBAL_ATOM_DECL(stream);                          \
+    GLOBAL_ATOM_DECL(sync);                            \
     GLOBAL_ATOM_DECL(syncnt);                          \
     GLOBAL_ATOM_DECL(syn_rcvd);                        \
     GLOBAL_ATOM_DECL(syn_retrans);                     \
@@ -2345,6 +2350,7 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(unspec);                          \
     GLOBAL_ATOM_DECL(up);                              \
     GLOBAL_ATOM_DECL(update_accept_context);           \
+    GLOBAL_ATOM_DECL(uring);                           \
     GLOBAL_ATOM_DECL(update_connect_context);          \
     GLOBAL_ATOM_DECL(usec);                            \
     GLOBAL_ATOM_DECL(user);                            \
@@ -2624,6 +2630,20 @@ static ESockIoBackend io_backend = {0};
      io_backend.send((ENV), (D),                        \
                      (SR), (RF), (L), (F)) :            \
      enif_raise_exception((ENV), MKA((ENV), "notsup")))
+#ifdef ESOCK_USE_URING
+#define ESOCK_IO_SENDTO(ENV, D,                           \
+                        SOCKR, SENDR,                     \
+                        DP, F, TAP, TAL)                  \
+    ((D)->useUring ?                                      \
+     esuring_sendto((ENV), (D),                           \
+                    (SOCKR), (SENDR),                     \
+                    (DP), (F), (TAP), (TAL)) :            \
+     ((io_backend.sendto != NULL) ?                       \
+      io_backend.sendto((ENV), (D),                       \
+                        (SOCKR), (SENDR),                 \
+                        (DP), (F), (TAP), (TAL)) :        \
+      enif_raise_exception((ENV), MKA((ENV), "notsup"))))
+#else
 #define ESOCK_IO_SENDTO(ENV, D,                           \
                         SOCKR, SENDR,                     \
                         DP, F, TAP, TAL)                  \
@@ -2632,6 +2652,20 @@ static ESockIoBackend io_backend = {0};
                        (SOCKR), (SENDR),                  \
                        (DP), (F), (TAP), (TAL)) :         \
      enif_raise_exception((ENV), MKA((ENV), "notsup")))
+#endif
+#ifdef ESOCK_USE_URING
+#define ESOCK_IO_SENDMSG(ENV, D,                        \
+                         SOCKR, SENDR, EM, F, EIOV)     \
+    ((D)->useUring ?                                    \
+     esuring_sendmsg((ENV), (D),                        \
+                     (SOCKR), (SENDR),                  \
+                     (EM), (F), (EIOV), &data) :        \
+     ((io_backend.sendmsg != NULL) ?                    \
+      io_backend.sendmsg((ENV), (D),                    \
+                         (SOCKR), (SENDR),              \
+                         (EM), (F), (EIOV), &data) :    \
+      enif_raise_exception((ENV), MKA((ENV), "notsup"))))
+#else
 #define ESOCK_IO_SENDMSG(ENV, D,                        \
                          SOCKR, SENDR, EM, F, EIOV)     \
     ((io_backend.sendmsg != NULL) ?                     \
@@ -2639,6 +2673,7 @@ static ESockIoBackend io_backend = {0};
                         (SOCKR), (SENDR),               \
                         (EM), (F), (EIOV), &data) :     \
      enif_raise_exception((ENV), MKA((ENV), "notsup")))
+#endif
 #define ESOCK_IO_SENDV(ENV, D,                   \
                        SOCKR, SENDR, EIOV)               \
     ((io_backend.sendv != NULL) ?                        \
@@ -2672,12 +2707,24 @@ static ESockIoBackend io_backend = {0};
      io_backend.recv((ENV), (D),                      \
                      (SR), (RR), (L), (F)) :          \
      enif_raise_exception((ENV), MKA((ENV), "notsup")))
+#ifdef ESOCK_USE_URING
+#define ESOCK_IO_RECVFROM(ENV, D,                         \
+                          SR, RR, L, F)                   \
+    ((D)->useUring ?                                      \
+     esuring_recvfrom((ENV), (D),                         \
+                      (SR), (RR), (L), (F)) :             \
+     ((io_backend.recvfrom != NULL) ?                     \
+      io_backend.recvfrom((ENV), (D),                     \
+                          (SR), (RR), (L), (F)) :         \
+      enif_raise_exception((ENV), MKA((ENV), "notsup"))))
+#else
 #define ESOCK_IO_RECVFROM(ENV, D,                         \
                           SR, RR, L, F)                   \
     ((io_backend.recvfrom != NULL) ?                      \
      io_backend.recvfrom((ENV), (D),                      \
                          (SR), (RR), (L), (F)) :          \
      enif_raise_exception((ENV), MKA((ENV), "notsup")))
+#endif
 #define ESOCK_IO_RECVMSG(ENV, D,                          \
                          SR, RR, BL, CL, F)               \
     ((io_backend.recvmsg != NULL) ?                       \
@@ -4110,7 +4157,11 @@ ERL_NIF_TERM esock_global_info(ErlNifEnv* env)
                           atom_iow,
                           esock_atom_counters,
                           atom_iov_max,
-                          atom_io_backend},
+                          atom_io_backend
+#ifdef ESOCK_USE_URING
+                          , MKA(env, "io_uring")
+#endif
+                },
                 vals[] = {dbg,
                           sockDbg,
                           eei,
@@ -4119,6 +4170,9 @@ ERL_NIF_TERM esock_global_info(ErlNifEnv* env)
                           gcnt,
                           iovMax,
                           ESOCK_IO_INFO(env)
+#ifdef ESOCK_USE_URING
+                          , esuring_info(env)
+#endif
                           /* This mess is just a temporary hack
                            * and shall be replaced by a callback
                            * function (eventually).
@@ -5269,6 +5323,39 @@ BOOLEAN_T esock_open_use_registry(ErlNifEnv*   env,
 {
     return esock_get_bool_from_map(env, eopts, esock_atom_use_registry, def);
 }
+
+#ifdef ESOCK_USE_URING
+/*
+ * Check if io_backend option is set to 'uring'.
+ * Returns TRUE if uring backend should be used.
+ * Returns FALSE for 'sync' or if option is not specified.
+ * Sets *unsupported to TRUE if an unknown value was provided.
+ */
+extern
+BOOLEAN_T esock_open_use_uring(ErlNifEnv*   env,
+                               ERL_NIF_TERM eopts,
+                               BOOLEAN_T*   unsupported)
+{
+    ERL_NIF_TERM val;
+
+    *unsupported = FALSE;
+
+    if (enif_get_map_value(env, eopts, esock_atom_io_backend, &val)) {
+        if (COMPARE(val, esock_atom_uring) == 0) {
+            return TRUE;
+        } else if (COMPARE(val, esock_atom_sync) == 0) {
+            return FALSE;
+        } else {
+            /* Unknown value */
+            *unsupported = TRUE;
+            return FALSE;
+        }
+    }
+
+    /* Default: sync backend */
+    return FALSE;
+}
+#endif
 
 extern
 BOOLEAN_T esock_open_which_protocol(SOCKET sock, int* proto)
@@ -13779,6 +13866,9 @@ void esock_on_halt(void* priv_data)
     VOIDP(priv_data);
 #endif
 
+#ifdef ESOCK_USE_URING
+    esuring_finish();
+#endif
     ESOCK_IO_FIN();
 }
 
@@ -14135,6 +14225,15 @@ int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
         esock_error_msg("Failed initiating I/O backend");
         return 1; // Failure
     }
+
+#ifdef ESOCK_USE_URING
+    // ESOCK_EPRINTF("\r\n[ESOCK] init io_uring backend\r\n");
+    if (esuring_init(ioNumThreads, &data) != ESOCK_IO_OK) {
+        esock_warning_msg("Failed initiating io_uring backend "
+                          "(io_uring sockets will not be available)");
+        /* Not a fatal error - sync backend is still available */
+    }
+#endif
 
     // ESOCK_EPRINTF("\r\n[ESOCK] open socket (nif) resource\r\n");
     esocks = enif_open_resource_type_x(env,

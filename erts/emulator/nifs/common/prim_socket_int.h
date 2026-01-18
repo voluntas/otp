@@ -525,6 +525,9 @@ typedef struct {
     /* +++ The dbg flag for SSDBG +++ */
     BOOLEAN_T          dbg;
     BOOLEAN_T          useReg;
+#ifdef ESOCK_USE_URING
+    BOOLEAN_T          useUring;  /* Use io_uring backend for this socket */
+#endif
 
     /* Lock order: readMtx, writeMtx, cntMtx
      */
@@ -560,6 +563,11 @@ extern BOOLEAN_T esock_open_is_debug(ErlNifEnv*   env,
 extern BOOLEAN_T esock_open_use_registry(ErlNifEnv*   env,
                                          ERL_NIF_TERM eopts,
                                          BOOLEAN_T    def);
+#ifdef ESOCK_USE_URING
+extern BOOLEAN_T esock_open_use_uring(ErlNifEnv*   env,
+                                      ERL_NIF_TERM eopts,
+                                      BOOLEAN_T*   unsupported);
+#endif
 extern BOOLEAN_T esock_open_which_protocol(SOCKET sock, int* proto);
 
 extern BOOLEAN_T esock_getopt_int(SOCKET sock,

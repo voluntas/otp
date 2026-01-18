@@ -794,11 +794,32 @@ ERL_NIF_TERM essio_open_with_fd(ErlNifEnv*       env,
 {
     BOOLEAN_T        dbg    = esock_open_is_debug(env, eopts, dataP->sockDbg);
     BOOLEAN_T        useReg = esock_open_use_registry(env, eopts, dataP->useReg);
+#ifdef ESOCK_USE_URING
+    BOOLEAN_T        unsupported;
+    BOOLEAN_T        useUring = esock_open_use_uring(env, eopts, &unsupported);
+#else
+    ERL_NIF_TERM     ioBackendVal;
+#endif
     ESockDescriptor* descP;
     ERL_NIF_TERM     sockRef;
     int              domain, type, protocol;
     int              save_errno = 0;
     BOOLEAN_T        closeOnClose;
+
+#ifdef ESOCK_USE_URING
+    /* Check for invalid io_backend value */
+    if (unsupported) {
+        return esock_make_error(env, esock_atom_einval);
+    }
+#else
+    /* io_uring not compiled in - check if user requested it */
+    if (enif_get_map_value(env, eopts, esock_atom_io_backend, &ioBackendVal)) {
+        if (COMPARE(ioBackendVal, esock_atom_uring) == 0) {
+            /* User requested io_uring but it's not compiled in */
+            return esock_make_error(env, esock_atom_enotsup);
+        }
+    }
+#endif
     SOCKET           sock;
     ErlNifPid        self;
 
@@ -930,6 +951,9 @@ ERL_NIF_TERM essio_open_with_fd(ErlNifEnv*       env,
 
     descP->dbg    = dbg;
     descP->useReg = useReg;
+#ifdef ESOCK_USE_URING
+    descP->useUring = useUring;
+#endif
     esock_inc_socket(domain, type, protocol);
 
     /* And finally (maybe) update the registry.
@@ -1034,6 +1058,12 @@ ERL_NIF_TERM essio_open_plain(ErlNifEnv*       env,
 {
     BOOLEAN_T        dbg    = esock_open_is_debug(env, eopts, dataP->sockDbg);
     BOOLEAN_T        useReg = esock_open_use_registry(env, eopts, dataP->useReg);
+#ifdef ESOCK_USE_URING
+    BOOLEAN_T        unsupported;
+    BOOLEAN_T        useUring = esock_open_use_uring(env, eopts, &unsupported);
+#else
+    ERL_NIF_TERM     ioBackendVal;
+#endif
     ESockDescriptor* descP;
     ERL_NIF_TERM     sockRef;
     int              proto = protocol;
@@ -1044,6 +1074,21 @@ ERL_NIF_TERM essio_open_plain(ErlNifEnv*       env,
     int              current_ns = 0;
 #endif
     ErlNifPid        self;
+
+#ifdef ESOCK_USE_URING
+    /* Check for invalid io_backend value */
+    if (unsupported) {
+        return esock_make_error(env, esock_atom_einval);
+    }
+#else
+    /* io_uring not compiled in - check if user requested it */
+    if (enif_get_map_value(env, eopts, esock_atom_io_backend, &ioBackendVal)) {
+        if (COMPARE(ioBackendVal, esock_atom_uring) == 0) {
+            /* User requested io_uring but it's not compiled in */
+            return esock_make_error(env, esock_atom_enotsup);
+        }
+    }
+#endif
 
     /* Keep track of the creator
      * This should not be a problem, but just in case
@@ -1128,6 +1173,9 @@ ERL_NIF_TERM essio_open_plain(ErlNifEnv*       env,
 
     descP->dbg    = dbg;
     descP->useReg = useReg;
+#ifdef ESOCK_USE_URING
+    descP->useUring = useUring;
+#endif
     esock_inc_socket(domain, type, proto);
 
     /* And finally (maybe) update the registry */
