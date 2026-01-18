@@ -6001,12 +6001,105 @@ ERL_NIF_TERM nif_sendmmsg(ErlNifEnv*         env,
     res = esuring_sendmmsg(env, descP, sockRef, sendRef, eMsgs, flags, &data);
 #else
     /* Fallback: not supported without io_uring */
-    res = esock_make_error(env, esock_atom_notsup);
+    res = esock_make_error(env, esock_atom_enotsup);
 #endif
 
     MUNLOCK(descP->writeMtx);
 
     SSDBG( descP, ("SOCKET", "nif_sendmmsg(%T) -> done with"
+                   "\r\n   res: %T"
+                   "\r\n", sockRef, res) );
+
+    return res;
+}
+
+
+/* ----------------------------------------------------------------------
+ * nif_recvmmsg
+ *
+ * Description:
+ * Receive multiple messages from a socket using batch reception.
+ *
+ * Arguments:
+ * Socket (ref) - Points to the socket descriptor.
+ * VLen         - Maximum number of messages to receive.
+ * BufSz        - Buffer size for each message.
+ * Flags        - Recv flags as an integer().
+ * RecvRef      - A unique id reference() for this request.
+ */
+
+static
+ERL_NIF_TERM nif_recvmmsg(ErlNifEnv*         env,
+                          int                argc,
+                          const ERL_NIF_TERM argv[])
+{
+    ERL_NIF_TERM     res, sockRef, recvRef;
+    ESockDescriptor* descP;
+    int              flags;
+    unsigned int     vlen;
+    ErlNifUInt64     bufSz64;
+    size_t           bufSz;
+
+    ESOCK_ASSERT( argc == 5 );
+
+    SGDBG( ("SOCKET", "nif_recvmmsg -> entry with argc: %d\r\n", argc) );
+
+    sockRef = argv[0];
+    recvRef = argv[4];
+
+    if (! ESOCK_GET_RESOURCE(env, sockRef, (void**) &descP)) {
+        SGDBG( ("SOCKET", "nif_recvmmsg -> get resource failed\r\n") );
+        return enif_make_badarg(env);
+    }
+
+    /* Extract arguments and perform preliminary validation */
+    if (! enif_is_ref(env, recvRef)) {
+        SSDBG( descP, ("SOCKET", "nif_recvmmsg -> argv decode failed\r\n") );
+        return enif_make_badarg(env);
+    }
+    if (! GET_UINT(env, argv[1], &vlen)) {
+        if (IS_INTEGER(env, argv[1]))
+            return esock_make_error_integer_range(env, argv[1]);
+        else
+            return enif_make_badarg(env);
+    }
+    if (! enif_get_uint64(env, argv[2], &bufSz64)) {
+        if (IS_INTEGER(env, argv[2]))
+            return esock_make_error_integer_range(env, argv[2]);
+        else
+            return enif_make_badarg(env);
+    }
+    bufSz = (size_t)bufSz64;
+    if (! GET_INT(env, argv[3], &flags)) {
+        if (IS_INTEGER(env, argv[3]))
+            return esock_make_error_integer_range(env, argv[3]);
+        else
+            return enif_make_badarg(env);
+    }
+
+    MLOCK(descP->readMtx);
+
+    SSDBG( descP,
+           ("SOCKET", "nif_recvmmsg(%T), {%d,0x%X} ->"
+            "\r\n   RecvRef:   %T"
+            "\r\n   vlen:      %u"
+            "\r\n   bufSz:     %lu"
+            "\r\n   flags:     0x%X"
+            "\r\n",
+            sockRef, descP->sock, descP->readState,
+            recvRef, vlen, (unsigned long)bufSz, flags) );
+
+#ifdef ESOCK_USE_URING
+    /* Use io_uring backend for batch recv */
+    res = esuring_recvmmsg(env, descP, sockRef, recvRef, vlen, bufSz, flags, &data);
+#else
+    /* Fallback: not supported without io_uring */
+    res = esock_make_error(env, esock_atom_enotsup);
+#endif
+
+    MUNLOCK(descP->readMtx);
+
+    SSDBG( descP, ("SOCKET", "nif_recvmmsg(%T) -> done with"
                    "\r\n   res: %T"
                    "\r\n", sockRef, res) );
 
@@ -13982,6 +14075,7 @@ ErlNifFunc esock_funcs[] =
     {"nif_recv",                4, nif_recv, 0},
     {"nif_recvfrom",            4, nif_recvfrom, 0},
     {"nif_recvmsg",             5, nif_recvmsg, 0},
+    {"nif_recvmmsg",            5, nif_recvmmsg, 0},
     {"nif_close",               1, nif_close, 0},
     {"nif_shutdown",            2, nif_shutdown, 0},
     {"nif_setopt",              5, nif_setopt, 0},

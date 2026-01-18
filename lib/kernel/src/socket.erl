@@ -292,6 +292,7 @@ server(Addr, Port) ->
          recv/1, recv/2, recv/3, recv/4,
          recvfrom/1, recvfrom/2, recvfrom/3, recvfrom/4,
          recvmsg/1, recvmsg/2, recvmsg/3, recvmsg/4, recvmsg/5,
+         recvmmsg/2, recvmmsg/3, recvmmsg/4, recvmmsg/5, recvmmsg/6,
 
          close/1,
          shutdown/2,
@@ -4466,6 +4467,147 @@ sendmmsg(?socket(SockRef), Msgs, Flags, _Timeout)
     prim_socket:sendmmsg(SockRef, Msgs, Flags, make_ref());
 sendmmsg(Socket, Msgs, Flags, Timeout) ->
     erlang:error(badarg, [Socket, Msgs, Flags, Timeout]).
+
+
+%% ===========================================================================
+%%
+%% recvmmsg - receive multiple messages in one call
+%%
+%% This function receives multiple UDP datagrams in a single call.
+%% VLen specifies the maximum number of messages to receive.
+%% BufSz specifies the buffer size for each message.
+%%
+%% Returns {ok, [#{addr => SockAddr, data => Binary}, ...]} on success.
+%% Returns {ok, []} if no data is currently available (non-blocking).
+%%
+%% ===========================================================================
+
+-doc """
+Equivalent to `recvmmsg(Socket, VLen, 2048, 0, [], infinity)`.
+""".
+-doc(#{since => <<"OTP 28.0">>}).
+-spec recvmmsg(Socket, VLen) -> {'ok', Msgs} | {'error', Reason}
+              when
+      Socket :: socket(),
+      VLen   :: non_neg_integer(),
+      Msgs   :: [#{addr := sockaddr_recv(), data := binary()}],
+      Reason :: posix() | 'closed' | 'notsup'.
+
+recvmmsg(Socket, VLen) ->
+    recvmmsg(Socket, VLen, 2048, 0, [], infinity).
+
+-doc """
+Equivalent to `recvmmsg(Socket, VLen, BufSz, 0, [], infinity)` or
+`recvmmsg(Socket, VLen, 2048, 0, Flags, infinity)`.
+""".
+-doc(#{since => <<"OTP 28.0">>}).
+-spec recvmmsg(Socket, VLen, BufSzOrFlags) ->
+          {'ok', Msgs} | {'error', Reason}
+              when
+      Socket      :: socket(),
+      VLen        :: non_neg_integer(),
+      BufSzOrFlags :: non_neg_integer() | [msg_flag() | integer()],
+      Msgs        :: [#{addr := sockaddr_recv(), data := binary()}],
+      Reason      :: posix() | 'closed' | 'notsup'.
+
+recvmmsg(Socket, VLen, BufSz) when is_integer(BufSz) ->
+    recvmmsg(Socket, VLen, BufSz, 0, [], infinity);
+recvmmsg(Socket, VLen, Flags) when is_list(Flags) ->
+    recvmmsg(Socket, VLen, 2048, 0, Flags, infinity).
+
+-doc """
+Equivalent to `recvmmsg(Socket, VLen, BufSz, 0, Flags, infinity)`.
+""".
+-doc(#{since => <<"OTP 28.0">>}).
+-spec recvmmsg(Socket, VLen, BufSz, Flags) ->
+          {'ok', Msgs} | {'error', Reason}
+              when
+      Socket :: socket(),
+      VLen   :: non_neg_integer(),
+      BufSz  :: non_neg_integer(),
+      Flags  :: [msg_flag() | integer()],
+      Msgs   :: [#{addr := sockaddr_recv(), data := binary()}],
+      Reason :: posix() | 'closed' | 'notsup'.
+
+recvmmsg(Socket, VLen, BufSz, Flags) ->
+    recvmmsg(Socket, VLen, BufSz, 0, Flags, infinity).
+
+-doc """
+Equivalent to `recvmmsg(Socket, VLen, BufSz, CtrlSz, Flags, infinity)`.
+""".
+-doc(#{since => <<"OTP 28.0">>}).
+-spec recvmmsg(Socket, VLen, BufSz, CtrlSz, Flags) ->
+          {'ok', Msgs} | {'error', Reason}
+              when
+      Socket :: socket(),
+      VLen   :: non_neg_integer(),
+      BufSz  :: non_neg_integer(),
+      CtrlSz :: non_neg_integer(),
+      Flags  :: [msg_flag() | integer()],
+      Msgs   :: [#{addr := sockaddr_recv(), data := binary()}],
+      Reason :: posix() | 'closed' | 'notsup'.
+
+recvmmsg(Socket, VLen, BufSz, CtrlSz, Flags) ->
+    recvmmsg(Socket, VLen, BufSz, CtrlSz, Flags, infinity).
+
+-doc """
+Receive multiple messages (datagrams) on a socket.
+
+This function is used to receive multiple UDP datagrams in a single
+system call, which can be more efficient than calling `recvfrom/4`
+multiple times when there are many datagrams to receive.
+
+**Arguments:**
+- `VLen` - Maximum number of messages to receive
+- `BufSz` - Buffer size for each message (should be >= MTU)
+- `CtrlSz` - Control message buffer size (currently ignored)
+- `Flags` - Receive flags
+- `Timeout` - Operation timeout (currently ignored, always non-blocking)
+
+**Return Values:**
+- `{ok, Msgs}` - List of received messages, each a map with `addr` and `data`
+- `{ok, []}` - No data currently available
+- `{error, Reason}` - An error occurred
+
+**Example:**
+```erlang
+{ok, Sock} = socket:open(inet, dgram, udp),
+ok = socket:bind(Sock, #{family => inet, addr => any, port => 5000}),
+case socket:recvmmsg(Sock, 64, 1500) of
+    {ok, []} ->
+        io:format("No data available~n");
+    {ok, Msgs} ->
+        lists:foreach(
+            fun(#{addr := Addr, data := Data}) ->
+                io:format("Received ~p bytes from ~p~n",
+                          [byte_size(Data), Addr])
+            end, Msgs);
+    {error, Reason} ->
+        io:format("Error: ~p~n", [Reason])
+end.
+```
+""".
+-doc(#{since => <<"OTP 28.0">>}).
+-spec recvmmsg(Socket, VLen, BufSz, CtrlSz, Flags, Timeout) ->
+          {'ok', Msgs} | {'error', Reason}
+              when
+      Socket  :: socket(),
+      VLen    :: non_neg_integer(),
+      BufSz   :: non_neg_integer(),
+      CtrlSz  :: non_neg_integer(),
+      Flags   :: [msg_flag() | integer()],
+      Timeout :: timeout(),
+      Msgs    :: [#{addr := sockaddr_recv(), data := binary()}],
+      Reason  :: posix() | 'closed' | 'notsup' | 'timeout'.
+
+recvmmsg(?socket(SockRef), VLen, BufSz, CtrlSz, Flags, _Timeout)
+  when is_reference(SockRef), is_integer(VLen), VLen >= 0,
+       is_integer(BufSz), BufSz >= 0,
+       is_integer(CtrlSz), CtrlSz >= 0,
+       is_list(Flags) ->
+    prim_socket:recvmmsg(SockRef, VLen, BufSz, CtrlSz, Flags, make_ref());
+recvmmsg(Socket, VLen, BufSz, CtrlSz, Flags, Timeout) ->
+    erlang:error(badarg, [Socket, VLen, BufSz, CtrlSz, Flags, Timeout]).
 
 
 %% ---------------------------------------------------------------------------

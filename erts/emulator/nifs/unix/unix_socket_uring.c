@@ -123,8 +123,22 @@ esuring_init_ring(ESURingInstance* inst, unsigned int idx)
     }
 
     /* Calculate which SQPOLL group this ring belongs to */
-    /* rings_per_group determines how many rings share one SQPOLL thread */
-    rings_per_group = (gctrl.num_rings > 5) ? 2 : 1;  /* 2 rings per SQPOLL thread */
+    /* rings_per_group determines how many rings share one SQPOLL thread
+     * More rings per group = fewer SQPOLL threads = less CPU overhead
+     * but potentially higher contention on that thread.
+     *
+     * Strategy:
+     * - 1-4 schedulers: 1 SQPOLL thread (all rings share)
+     * - 5-8 schedulers: 2 SQPOLL threads (4 rings per thread)
+     * - 9-16 schedulers: 4 SQPOLL threads (4 rings per thread)
+     * - 17+ schedulers: 4 SQPOLL threads (capped)
+     */
+    if (gctrl.num_rings <= 5) {
+        rings_per_group = gctrl.num_rings - 1;  /* All normal schedulers share 1 SQPOLL */
+    } else {
+        rings_per_group = 4;  /* 4 rings per SQPOLL thread */
+    }
+    if (rings_per_group == 0) rings_per_group = 1;
     group_idx = (idx - 1) / rings_per_group;
     if (group_idx >= ESURING_MAX_SQPOLL_GROUPS) {
         group_idx = ESURING_MAX_SQPOLL_GROUPS - 1;  /* Cap to max groups */
@@ -471,11 +485,12 @@ esuring_finish(void)
 extern ERL_NIF_TERM
 esuring_info(ErlNifEnv* env)
 {
-    ERL_NIF_TERM keys[14], vals[14];
+    ERL_NIF_TERM keys[16], vals[16];
     ERL_NIF_TERM info;
     unsigned int i, sqpoll_count = 0;
     unsigned long total_sendto = 0, total_sendmsg = 0, total_recvfrom = 0;
     unsigned long total_sendmmsg = 0, total_sendmmsg_msgs = 0;
+    unsigned long total_recvmmsg = 0, total_recvmmsg_msgs = 0;
     unsigned long total_ring_full = 0, total_direct_syscall = 0;
 
     /* Aggregate statistics from all rings */
@@ -486,6 +501,8 @@ esuring_info(ErlNifEnv* env)
         total_sendmmsg += inst->stat_sendmmsg;
         total_sendmmsg_msgs += inst->stat_sendmmsg_msgs;
         total_recvfrom += inst->stat_recvfrom;
+        total_recvmmsg += inst->stat_recvmmsg;
+        total_recvmmsg_msgs += inst->stat_recvmmsg_msgs;
         total_ring_full += inst->stat_ring_full;
         total_direct_syscall += inst->stat_direct_syscall;
         if (inst->sqpoll) sqpoll_count++;
@@ -526,16 +543,22 @@ esuring_info(ErlNifEnv* env)
     keys[10] = enif_make_atom(env, "recvfrom_count");
     vals[10] = enif_make_uint64(env, total_recvfrom);
 
-    keys[11] = enif_make_atom(env, "ring_full_count");
-    vals[11] = enif_make_uint64(env, total_ring_full);
+    keys[11] = enif_make_atom(env, "recvmmsg_calls");
+    vals[11] = enif_make_uint64(env, total_recvmmsg);
 
-    keys[12] = enif_make_atom(env, "direct_syscall_count");
-    vals[12] = enif_make_uint64(env, total_direct_syscall);
+    keys[12] = enif_make_atom(env, "recvmmsg_msgs");
+    vals[12] = enif_make_uint64(env, total_recvmmsg_msgs);
 
-    keys[13] = enif_make_atom(env, "cqe_processed");
-    vals[13] = enif_make_uint64(env, gctrl.stat_cqe_processed);
+    keys[13] = enif_make_atom(env, "ring_full_count");
+    vals[13] = enif_make_uint64(env, total_ring_full);
 
-    enif_make_map_from_arrays(env, keys, vals, 14, &info);
+    keys[14] = enif_make_atom(env, "direct_syscall_count");
+    vals[14] = enif_make_uint64(env, total_direct_syscall);
+
+    keys[15] = enif_make_atom(env, "cqe_processed");
+    vals[15] = enif_make_uint64(env, gctrl.stat_cqe_processed);
+
+    enif_make_map_from_arrays(env, keys, vals, 16, &info);
     return info;
 }
 
@@ -1327,6 +1350,156 @@ esuring_sendmmsg(ErlNifEnv*       env,
     __atomic_fetch_add(&inst->stat_sendmmsg_msgs, sent_count, __ATOMIC_RELAXED);
 
     return esock_make_ok2(env, enif_make_uint(env, sent_count));
+}
+
+/* ========================================================================
+ * recvmmsg - batch receive multiple messages
+ *
+ * Uses Linux recvmmsg syscall for efficient batch reception.
+ * This is a synchronous operation that receives up to vlen messages
+ * in a single syscall, which is more efficient than multiple recvfrom calls.
+ *
+ * Returns: {ok, [#{addr => Addr, data => Binary}, ...]} | {error, Reason}
+ */
+
+extern ERL_NIF_TERM
+esuring_recvmmsg(ErlNifEnv*       env,
+                 ESockDescriptor* descP,
+                 ERL_NIF_TERM     sockRef,
+                 ERL_NIF_TERM     recvRef,
+                 unsigned int     vlen,
+                 size_t           bufSz,
+                 int              flags,
+                 const ESockData* dataP)
+{
+    ESURingInstance* inst = esuring_get_ring();
+    struct mmsghdr* msgvec;
+    struct iovec* iovecs;
+    ESockAddress* addrs;
+    unsigned char* bufs;
+    int ret, i;
+    ERL_NIF_TERM result_list;
+    unsigned int recv_count;
+
+    (void)sockRef;
+    (void)recvRef;
+    (void)dataP;
+
+    __atomic_fetch_add(&inst->stat_recvmmsg, 1, __ATOMIC_RELAXED);
+
+    if (!IS_OPEN(descP->readState))
+        return esock_make_error_closed(env);
+
+    /* Limit vlen to max */
+    if (vlen > ESURING_MMSG_MAX)
+        vlen = ESURING_MMSG_MAX;
+    if (vlen == 0)
+        vlen = 64;  /* Default batch size */
+
+    /* Default buffer size */
+    if (bufSz == 0)
+        bufSz = ESURING_RECV_BUF_SIZE;
+    if (bufSz > 65536)
+        bufSz = 65536;
+
+    /* Allocate message vectors */
+    msgvec = enif_alloc(vlen * sizeof(struct mmsghdr));
+    if (msgvec == NULL)
+        return esock_make_error_errno(env, ENOMEM);
+
+    iovecs = enif_alloc(vlen * sizeof(struct iovec));
+    if (iovecs == NULL) {
+        enif_free(msgvec);
+        return esock_make_error_errno(env, ENOMEM);
+    }
+
+    addrs = enif_alloc(vlen * sizeof(ESockAddress));
+    if (addrs == NULL) {
+        enif_free(iovecs);
+        enif_free(msgvec);
+        return esock_make_error_errno(env, ENOMEM);
+    }
+
+    bufs = enif_alloc(vlen * bufSz);
+    if (bufs == NULL) {
+        enif_free(addrs);
+        enif_free(iovecs);
+        enif_free(msgvec);
+        return esock_make_error_errno(env, ENOMEM);
+    }
+
+    /* Initialize message headers */
+    memset(msgvec, 0, vlen * sizeof(struct mmsghdr));
+    for (i = 0; i < (int)vlen; i++) {
+        iovecs[i].iov_base = bufs + (i * bufSz);
+        iovecs[i].iov_len = bufSz;
+        msgvec[i].msg_hdr.msg_iov = &iovecs[i];
+        msgvec[i].msg_hdr.msg_iovlen = 1;
+        msgvec[i].msg_hdr.msg_name = &addrs[i];
+        msgvec[i].msg_hdr.msg_namelen = sizeof(ESockAddress);
+    }
+
+    /* Call recvmmsg - use MSG_DONTWAIT to return immediately with available data */
+    ret = recvmmsg(descP->sock, msgvec, vlen, flags | MSG_DONTWAIT, NULL);
+
+    if (ret < 0) {
+        int save_errno = errno;
+        enif_free(bufs);
+        enif_free(addrs);
+        enif_free(iovecs);
+        enif_free(msgvec);
+
+        if (save_errno == EAGAIN || save_errno == EWOULDBLOCK) {
+            /* No data available - return empty list */
+            return esock_make_ok2(env, enif_make_list(env, 0));
+        }
+        return esock_make_error_errno(env, save_errno);
+    }
+
+    recv_count = (unsigned int)ret;
+    __atomic_fetch_add(&inst->stat_recvmmsg_msgs, recv_count, __ATOMIC_RELAXED);
+
+    /* Build result list */
+    result_list = enif_make_list(env, 0);
+
+    for (i = recv_count - 1; i >= 0; i--) {
+        ERL_NIF_TERM eAddr, eData, eMsg;
+        ErlNifBinary bin;
+        unsigned int msg_len = msgvec[i].msg_len;
+
+        /* Encode source address */
+        esock_encode_sockaddr(env,
+                              &addrs[i],
+                              msgvec[i].msg_hdr.msg_namelen,
+                              &eAddr);
+
+        /* Create binary with received data */
+        if (!enif_alloc_binary(msg_len, &bin)) {
+            /* Memory allocation failed - return what we have */
+            break;
+        }
+        memcpy(bin.data, bufs + (i * bufSz), msg_len);
+        eData = enif_make_binary(env, &bin);
+
+        /* Create message map #{addr => Addr, data => Data} */
+        ERL_NIF_TERM keys[2], vals[2];
+        keys[0] = esock_atom_addr;
+        vals[0] = eAddr;
+        keys[1] = esock_atom_data;
+        vals[1] = eData;
+        enif_make_map_from_arrays(env, keys, vals, 2, &eMsg);
+
+        /* Prepend to list */
+        result_list = enif_make_list_cell(env, eMsg, result_list);
+    }
+
+    /* Cleanup */
+    enif_free(bufs);
+    enif_free(addrs);
+    enif_free(iovecs);
+    enif_free(msgvec);
+
+    return esock_make_ok2(env, result_list);
 }
 
 #endif /* ESOCK_USE_URING */

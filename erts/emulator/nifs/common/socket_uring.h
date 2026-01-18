@@ -59,9 +59,10 @@
 /* Batch submit configuration */
 #define ESURING_BATCH_SIZE      64      /* Submit after this many SQEs */
 
-/* sendmmsg configuration */
-#define ESURING_MMSG_MAX        1024    /* Max messages per sendmmsg call */
+/* sendmmsg/recvmmsg configuration */
+#define ESURING_MMSG_MAX        1024    /* Max messages per sendmmsg/recvmmsg call */
 #define ESURING_MMSG_BUF_SIZE   (ESURING_MMSG_MAX * 1500) /* ~1.5MB buffer */
+#define ESURING_RECV_BUF_SIZE   2048    /* Default receive buffer per message */
 
 /* ========================================================================
  * Lock-free helpers
@@ -132,6 +133,8 @@ typedef struct {
     volatile unsigned long stat_sendmmsg;
     volatile unsigned long stat_sendmmsg_msgs;
     volatile unsigned long stat_recvfrom;
+    volatile unsigned long stat_recvmmsg;
+    volatile unsigned long stat_recvmmsg_msgs;
     volatile unsigned long stat_ring_full;
     volatile unsigned long stat_direct_syscall;
 } ESURingInstance;
@@ -230,6 +233,20 @@ extern ERL_NIF_TERM esuring_sendmmsg(ErlNifEnv*       env,
                                      ERL_NIF_TERM     sockRef,
                                      ERL_NIF_TERM     sendRef,
                                      ERL_NIF_TERM     eMsgs,
+                                     int              flags,
+                                     const ESockData* dataP);
+
+/* ========================================================================
+ * recvmmsg - batch receive multiple messages
+ *
+ * Returns: {ok, [#{addr => Addr, data => Binary}, ...]} | {error, Reason}
+ */
+extern ERL_NIF_TERM esuring_recvmmsg(ErlNifEnv*       env,
+                                     ESockDescriptor* descP,
+                                     ERL_NIF_TERM     sockRef,
+                                     ERL_NIF_TERM     recvRef,
+                                     unsigned int     vlen,
+                                     size_t           bufSz,
                                      int              flags,
                                      const ESockData* dataP);
 
