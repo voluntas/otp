@@ -668,8 +668,13 @@ static EC_KEY* ec_key_new(ErlNifEnv* env, ERL_NIF_TERM curve_arg, size_t *size)
         goto err;
 
     if (enif_inspect_binary(env, prime[2], &seed)) {
+        /* AWS-LC: EC_GROUP_set_seed does nothing and returns 0, skip the check */
+#ifndef HAS_AWSLC
         if (!EC_GROUP_set_seed(group, seed.data, seed.size))
             goto err;
+#else
+        (void)EC_GROUP_set_seed(group, seed.data, seed.size);
+#endif
     }
 
     if (!term2point(env, curve[2], group, &point))

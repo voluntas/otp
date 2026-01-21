@@ -43,7 +43,11 @@ static struct cipher_type_t cipher_types[] =
 
 #ifdef HAVE_DES
     {{"des_cbc"}, "des-cbc", {&EVP_des_cbc},  0, NO_FIPS_CIPHER},
+# ifdef HAVE_DES_CFB8
     {{"des_cfb"}, "des-cfb", {&EVP_des_cfb8}, 0, NO_FIPS_CIPHER},
+# else
+    {{"des_cfb"}, "des-cfb", {NULL}, 0, 0},
+# endif
     {{"des_ecb"}, "des-ecb", {&EVP_des_ecb},  0, NO_FIPS_CIPHER | ECB_BUG_0_9_8L},
 #else
     {{"des_cbc"}, "des-cbc", {NULL}, 0, 0},

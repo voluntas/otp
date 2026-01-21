@@ -58,6 +58,37 @@
 # include <openssl/provider.h>
 #endif
 
+/* AWS-LC compatibility macros
+ * AWS-LC uses generic AEAD control codes instead of CCM-specific ones.
+ * Also provides missing EVP_CIPHER_type and OPENSSL_ECC_MAX_FIELD_BITS.
+ * BN_FLG_CONSTTIME is intentionally removed in AWS-LC (constant-time is default).
+ */
+#ifdef HAS_AWSLC
+# ifndef EVP_CTRL_CCM_SET_IVLEN
+#  define EVP_CTRL_CCM_SET_IVLEN EVP_CTRL_AEAD_SET_IVLEN
+# endif
+# ifndef EVP_CTRL_CCM_GET_TAG
+#  define EVP_CTRL_CCM_GET_TAG EVP_CTRL_AEAD_GET_TAG
+# endif
+# ifndef EVP_CTRL_CCM_SET_TAG
+#  define EVP_CTRL_CCM_SET_TAG EVP_CTRL_AEAD_SET_TAG
+# endif
+# ifndef EVP_CIPHER_type
+#  define EVP_CIPHER_type(cipher) EVP_CIPHER_nid(cipher)
+# endif
+# ifndef OPENSSL_ECC_MAX_FIELD_BITS
+#  define OPENSSL_ECC_MAX_FIELD_BITS 661
+# endif
+/* BN_FLG_CONSTTIME removed in AWS-LC; constant-time ops are default */
+# ifndef BN_FLG_CONSTTIME
+#  define BN_FLG_CONSTTIME 0
+# endif
+/* EVP_PKEY_CMAC is not defined in AWS-LC but NID_cmac exists */
+# ifndef EVP_PKEY_CMAC
+#  define EVP_PKEY_CMAC NID_cmac
+# endif
+#endif
+
 /* LibreSSL was cloned from OpenSSL 1.0.1g and claims to be API and BPI compatible
  * with 1.0.1.
  *
@@ -119,7 +150,10 @@
 
 # if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION_PLAIN(1,1,1)
 #   define HAVE_PKEY_new_raw_private_key
+/* AWS-LC does not have EVP_PKEY_new_CMAC_key */
+#  ifndef HAS_AWSLC
 #   define HAVE_EVP_PKEY_new_CMAC_key
+#  endif
 #   define HAVE_DigestSign_as_single_op
 # endif
 #endif
@@ -158,7 +192,8 @@
 #endif
 
 
-#if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION_PLAIN(1,0,0)
+/* AWS-LC does not have modes.h (CRYPTO_gcm128_* APIs) */
+#if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION_PLAIN(1,0,0) && !defined(HAS_AWSLC)
 #include <openssl/modes.h>
 #endif
 
@@ -247,13 +282,21 @@
 #ifndef OPENSSL_NO_DES
 # define HAVE_DES
 
-# if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION(0,9,7,'e')
+/* AWS-LC does not have EVP_des_cfb8 / EVP_des_ede3_cfb8 */
+# if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION(0,9,7,'e') && !defined(HAS_AWSLC)
 #  define HAVE_DES_ede3_cfb
 # endif
 
 # if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION(0,9,7,'e')
 #  define HAVE_DES_ede3_cbc
 # endif
+#endif
+
+/* AWS-LC does not have EVP_des_cfb8 */
+#if defined(HAS_AWSLC)
+# undef HAVE_DES_CFB8
+#else
+# define HAVE_DES_CFB8
 #endif
 
 #ifndef OPENSSL_NO_DH
@@ -298,6 +341,7 @@
 // (test for >= 1.1.1pre8)
 #if OPENSSL_VERSION_NUMBER >= (PACKED_OPENSSL_VERSION_PLAIN(1,1,1) -7) \
     && !defined(HAS_LIBRESSL) \
+    && !defined(HAS_AWSLC) \
     && defined(HAVE_EC)
 # ifdef HAVE_DH
 #   define HAVE_X25519
@@ -307,6 +351,14 @@
 #   define HAVE_ED25519
 #   define HAVE_ED448
 # endif
+#endif
+
+/* AWS-LC: Only Ed25519/X25519 supported (Ed448/X448 not available) */
+#if defined(HAS_AWSLC) && defined(HAVE_EC)
+# ifdef HAVE_DH
+#   define HAVE_X25519
+# endif
+# define HAVE_ED25519
 #endif
 
 #if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION_PLAIN(1,0,1)
@@ -335,18 +387,22 @@
 # endif
 #endif
 
+/* AWS-LC does not have EVP_chacha20 (only EVP_chacha20_poly1305) */
 #if OPENSSL_VERSION_NUMBER >= PACKED_OPENSSL_VERSION(1,1,0,'d')
 # ifndef HAS_LIBRESSL
 #  ifndef OPENSSL_NO_CHACHA
+#   ifndef HAS_AWSLC
 #    define HAVE_CHACHA20
+#   endif
 #  endif
 # endif
 #endif
 
 // OPENSSL_VERSION_NUMBER >= 1.1.1-pre8
+/* AWS-LC does not have EVP_PKEY_POLY1305 */
 #if OPENSSL_VERSION_NUMBER >= (PACKED_OPENSSL_VERSION_PLAIN(1,1,1)-7)
 # ifndef HAS_LIBRESSL
-#  if !defined(OPENSSL_NO_POLY1305)
+#  if !defined(OPENSSL_NO_POLY1305) && !defined(HAS_AWSLC)
 #    define HAVE_POLY1305
 #  endif
 # endif
